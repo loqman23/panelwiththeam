@@ -14,7 +14,7 @@ A beautiful dark theme for Pterodactyl Panel with an easy installation script.
 
 1. Download the installation script:
 ```bash
-wget https://raw.githubusercontent.com/loqmanas/pterodactyl-theme/main/install.sh
+wget https://raw.githubusercontent.com/loqman23/panelwiththeam/main/install.sh
 ```
 
 2. Make it executable:
