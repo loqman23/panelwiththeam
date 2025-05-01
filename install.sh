@@ -28,13 +28,11 @@ echo -e "${YELLOW}Created by loqmanas${NC}\n"
 check_requirements() {
     echo -e "\n${PURPLE}➤ Checking system requirements...${NC}"
     
-    # Check if running as root
     if [ "$EUID" -ne 0 ]; then 
         echo -e "${RED}✗ Please run as root${NC}"
         exit 1
     fi
     
-    # Check if system is Debian
     if ! grep -q 'Debian' /etc/os-release; then
         echo -e "${RED}✗ This script only supports Debian systems${NC}"
         exit 1
@@ -56,11 +54,37 @@ setup_database() {
     read -s -p "Database Password: " DB_PASS
     echo
     
-    # Create database and user
     mysql -e "CREATE DATABASE ${DB_NAME};"
     mysql -e "CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';"
     mysql -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'127.0.0.1' WITH GRANT OPTION;"
     mysql -e "FLUSH PRIVILEGES;"
+    
+    # Create .env file
+    cat > /var/www/pterodactyl/.env <<EOF
+APP_URL=https://${DOMAIN}
+APP_TIMEZONE=UTC
+APP_SERVICE_AUTHOR=noreply@example.com
+APP_ENVIRONMENT_ONLY=false
+
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=${DB_NAME}
+DB_USERNAME=${DB_USER}
+DB_PASSWORD=${DB_PASS}
+
+CACHE_DRIVER=file
+SESSION_DRIVER=file
+QUEUE_CONNECTION=database
+
+MAIL_MAILER=smtp
+MAIL_HOST=localhost
+MAIL_PORT=25
+MAIL_USERNAME=
+MAIL_PASSWORD=
+MAIL_ENCRYPTION=null
+MAIL_FROM_ADDRESS=noreply@example.com
+MAIL_FROM_NAME="Pterodactyl Panel"
+EOF
     
     echo -e "${GREEN}✓ Database configured successfully${NC}"
 }
@@ -74,8 +98,66 @@ setup_ssl() {
     # Install certbot
     apt install -y certbot python3-certbot-nginx
     
+    # Configure Nginx
+    cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN};
+    return 301 https://\$server_name\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${DOMAIN};
+
+    root /var/www/pterodactyl/public;
+    index index.php;
+
+    access_log /var/log/nginx/pterodactyl.app-access.log;
+    error_log  /var/log/nginx/pterodactyl.app-error.log error;
+
+    # SSL Configuration
+    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_session_cache shared:SSL:10m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
+    ssl_prefer_server_ciphers on;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param HTTP_PROXY "";
+        fastcgi_intercept_errors off;
+        fastcgi_buffer_size 16k;
+        fastcgi_buffers 4 16k;
+        fastcgi_connect_timeout 300;
+        fastcgi_send_timeout 300;
+        fastcgi_read_timeout 300;
+        include /etc/nginx/fastcgi_params;
+    }
+
+    location ~ /\.ht {
+        deny all;
+    }
+}
+EOF
+
+    ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
+    rm -f /etc/nginx/sites-enabled/default
+    
     # Get SSL certificate
     certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email admin@$DOMAIN
+    
+    systemctl restart nginx
     
     echo -e "${GREEN}✓ SSL certificate installed${NC}"
 }
@@ -133,6 +215,16 @@ install_panel() {
     tar -xzvf panel.tar.gz
     chmod -R 755 storage/* bootstrap/cache/
     
+    # Install dependencies
+    composer install --no-dev --optimize-autoloader
+    
+    # Generate key and setup database
+    php artisan key:generate --force
+    php artisan migrate --seed --force
+    
+    # Set permissions
+    chown -R www-data:www-data /var/www/pterodactyl/*
+    
     echo -e "${GREEN}✓ Panel base installation complete${NC}"
 }
 
@@ -141,74 +233,16 @@ install_theme() {
     echo -e "\n${PURPLE}➤ Installing Custom Theme...${NC}"
     
     cd /var/www/pterodactyl
-    mkdir -p resources/custom-theme
-    curl -Lo theme.tar.gz https://github.com/loqmanas/pterodactyl-theme/releases/latest/download/theme.tar.gz
-    tar -xzvf theme.tar.gz -C resources/custom-theme
     
-    # Apply theme modifications
-    cp -r resources/custom-theme/* resources/views/
+    # Copy theme files
+    cp -r admin/admin.style.css public/themes/
+    cp -r client/client.style.css public/themes/
+    
+    # Update panel configuration
+    php artisan config:cache
+    php artisan view:cache
     
     echo -e "${GREEN}✓ Theme installed successfully${NC}"
-}
-
-# Function to install wings
-install_wings() {
-    echo -e "\n${PURPLE}➤ Installing Wings...${NC}"
-    
-    # Install Docker
-    curl -sSL https://get.docker.com/ | CHANNEL=stable bash
-    systemctl enable --now docker
-    
-    # Install Wings
-    mkdir -p /etc/pterodactyl
-    curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_$([[ "$(uname -m)" == "x86_64" ]] && echo "amd64" || echo "arm64")"
-    chmod u+x /usr/local/bin/wings
-    
-    # Generate config
-    read -p "Panel Domain: " PANEL_DOMAIN
-    read -p "Application Token: " APP_TOKEN
-    
-    cat > /etc/pterodactyl/config.yml <<EOF
-panel:
-  location: https://${PANEL_DOMAIN}
-  token: ${APP_TOKEN}
-system:
-  data: /var/lib/pterodactyl/volumes
-  sftp:
-    bind_port: 2022
-api:
-  host: 0.0.0.0
-  port: 443
-  ssl:
-    enabled: false
-EOF
-    
-    # Create systemd service
-    cat > /etc/systemd/system/wings.service <<EOF
-[Unit]
-Description=Pterodactyl Wings Daemon
-After=docker.service
-Requires=docker.service
-PartOf=docker.service
-
-[Service]
-User=root
-WorkingDirectory=/etc/pterodactyl
-LimitNOFILE=4096
-PIDFile=/var/run/wings/daemon.pid
-ExecStart=/usr/local/bin/wings
-Restart=on-failure
-StartLimitInterval=180
-StartLimitBurst=30
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    systemctl enable --now wings
-    
-    echo -e "${GREEN}✓ Wings installed successfully${NC}"
 }
 
 # Main menu
@@ -216,10 +250,9 @@ while true; do
     echo -e "\n${CYAN}Please select an installation option:${NC}"
     echo "1) Install Pterodactyl Panel"
     echo "2) Install Panel with Custom Theme"
-    echo "3) Install Wings"
-    echo "4) Exit"
+    echo "3) Exit"
     
-    read -p "Enter choice [1-4]: " choice
+    read -p "Enter choice [1-3]: " choice
     
     case $choice in
         1)
@@ -229,7 +262,8 @@ while true; do
             setup_ssl
             setup_admin
             echo -e "\n${GREEN}✓ Pterodactyl Panel installation completed!${NC}"
-            echo -e "${YELLOW}Please visit your domain to login with your admin credentials${NC}"
+            echo -e "${YELLOW}Panel is now accessible at: https://${DOMAIN}${NC}"
+            break
             ;;
         2)
             check_requirements
@@ -239,14 +273,10 @@ while true; do
             install_theme
             setup_admin
             echo -e "\n${GREEN}✓ Pterodactyl Panel and Theme installation completed!${NC}"
-            echo -e "${YELLOW}Please visit your domain to login with your admin credentials${NC}"
+            echo -e "${YELLOW}Panel is now accessible at: https://${DOMAIN}${NC}"
+            break
             ;;
         3)
-            check_requirements
-            install_wings
-            echo -e "\n${GREEN}✓ Wings installation completed!${NC}"
-            ;;
-        4)
             echo -e "\n${GREEN}Thank you for using loqmanas's Pterodactyl installer!${NC}"
             exit 0
             ;;
