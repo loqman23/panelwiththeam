@@ -80,6 +80,27 @@ setup_ssl() {
     echo -e "${GREEN}✓ SSL certificate installed${NC}"
 }
 
+# Function to setup admin account
+setup_admin() {
+    echo -e "\n${PURPLE}➤ Admin Account Setup${NC}"
+    
+    read -p "Admin Username: " ADMIN_USER
+    read -p "Admin Email: " ADMIN_EMAIL
+    read -s -p "Admin Password (min 8 characters): " ADMIN_PASS
+    echo
+    
+    cd /var/www/pterodactyl
+    php artisan p:user:make \
+        --email="$ADMIN_EMAIL" \
+        --username="$ADMIN_USER" \
+        --name-first="Admin" \
+        --name-last="User" \
+        --password="$ADMIN_PASS" \
+        --admin=1
+    
+    echo -e "${GREEN}✓ Admin account created successfully${NC}"
+}
+
 # Main installation function
 install_panel() {
     echo -e "\n${PURPLE}➤ Installing Pterodactyl Panel...${NC}"
@@ -206,8 +227,9 @@ while true; do
             install_panel
             setup_database
             setup_ssl
+            setup_admin
             echo -e "\n${GREEN}✓ Pterodactyl Panel installation completed!${NC}"
-            echo -e "${YELLOW}Please visit your domain to complete the setup${NC}"
+            echo -e "${YELLOW}Please visit your domain to login with your admin credentials${NC}"
             ;;
         2)
             check_requirements
@@ -215,8 +237,9 @@ while true; do
             setup_database
             setup_ssl
             install_theme
+            setup_admin
             echo -e "\n${GREEN}✓ Pterodactyl Panel and Theme installation completed!${NC}"
-            echo -e "${YELLOW}Please visit your domain to complete the setup${NC}"
+            echo -e "${YELLOW}Please visit your domain to login with your admin credentials${NC}"
             ;;
         3)
             check_requirements
